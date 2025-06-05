@@ -13,7 +13,7 @@ clean:
 	@rm $(BIN_DIR)/snake
 	@rmdir $(BIN_DIR)
 
-$(BIN_DIR)/snake: snake.cc $(BIN_DIR) thirdparty/stb_image.h
+$(BIN_DIR)/snake: snake.cc thirdparty/stb_image.h
 	@mkdir -p $(BIN_DIR)
 	$(CXX) $(CXXFLAGS) $< $(LDFLAGS) -o $@
 

@@ -3,6 +3,7 @@
 #include <cassert>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <glm/ext/matrix_float4x4.hpp>
 #include <stdexcept>
 #include <utility>
@@ -22,6 +23,7 @@
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "thirdparty/stb_image.h"
+
 
 using vec2 = std::pair<uint8_t, uint8_t>;
 
@@ -87,6 +89,7 @@ layout(location = 0) in vec2 aPos;
 layout(location = 1) in vec2 aTexCoord;
 
 uniform mat4 MVP;
+uniform mat4 TEX_MVP;
 
 out vec2 texCoord;
 
@@ -94,7 +97,7 @@ void main()
 {
     gl_Position = MVP * vec4(aPos, 0.0, 1.0);
 
-    texCoord = aTexCoord;
+    texCoord = (TEX_MVP * vec4(aTexCoord, 0.0, 1.0)).xy;
 }
 )";
 
@@ -126,6 +129,8 @@ struct graphics
     GLuint program_{0};
 
     GLuint mvp_handle_{0};
+
+    GLuint tex_mvp_{0};
 
     // setup the libs, create a window
     graphics(app *app)
@@ -190,6 +195,8 @@ struct graphics
 
         mvp_handle_ = glGetUniformLocation(program_, "MVP");
 
+        tex_mvp_ = glGetUniformLocation(program_, "TEX_MVP");
+
         glDeleteShader(vshader);
         glDeleteShader(fshader);
 
@@ -219,6 +226,12 @@ struct graphics
     void setMVP(const glm::mat4 &mvp) const
     {
         glUniformMatrix4fv(mvp_handle_, 1, GL_FALSE, &mvp[0][0]);
+    }
+
+    void setTexOffset(const glm::mat4 &mvp) const
+    {
+        //glUniformMatrix3fv(tex_mvp_, 1, GL_FALSE, &offset[0][0]);
+        glUniformMatrix4fv(tex_mvp_, 1, GL_FALSE, &mvp[0][0]);
     }
 
     void swap()
@@ -255,67 +268,93 @@ struct graphics
 ////////////////////////////////////////
 
 
+GLuint load_texture(const char *path)
+{
+    GLuint id{0};
+    // The mode is needed since the imagedata got saved by gimp
+    // without alpha channel once. In that case I have only 3 channels
+    // which messes up the import if that is const.
+    GLuint mode{GL_RGBA};
+    // stbi loads image with first pixel top-left.
+    // OpenGL expects first pixel to be bottom-left in UV coords.
+    // With this function the pixel data comes as expected
+    // and the vertex data may be written like tutorials would
+    // write them ;-)
+    stbi_set_flip_vertically_on_load(true);
+
+    // load the image
+    int x=0,y=0,nrChannels=0;
+    auto * mem = stbi_load(path, &x, &y, &nrChannels, 0);
+    printf("image=%s,x=%d,y=%d,nrOfCh=%d\n", path, x, y, nrChannels);
+
+    assert(x != 0 && "x is 0");
+    assert(y != 0 && "y is 0");
+    assert(mem != NULL && "loading image failed");
+
+    glGenTextures(1, &id);
+
+    if(nrChannels == 3)
+    {
+        mode = GL_RGB;
+    }
+
+    glBindTexture(GL_TEXTURE_2D, id);
+    glTexImage2D(GL_TEXTURE_2D, 0, mode, x, y, 0, mode, GL_UNSIGNED_BYTE, mem);
+    glGenerateMipmap(GL_TEXTURE_2D);
+
+    stbi_image_free(mem);
+
+    return id;
+}
+
+GLuint load_vao_for_texture()
+{
+    GLuint vao{0};
+    const GLfloat vertices[] =
+    {
+        // position, texture coord
+        -1.0f, -1.0f, 0.0f, 0.0f, // bottom left
+        1.0f, -1.0f, 1.0f, 0.0f,  // bottom right
+        -1.0f,  1.0f, 0.0f, 1.0f, // top left
+        1.0f, -1.0f, 1.0f, 0.0f,  // bottom right
+        1.0f,  1.0f, 1.0f, 1.0f,  // top right
+        -1.0f,  1.0f, 0.0f, 1.0f  // top left
+    };
+
+    // sammelt die erstellten vbo
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+
+    GLuint vbo;
+    glGenBuffers(1, &vbo);
+
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
+
+    // the position
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(GLfloat) * 4, (void *)0);
+    glEnableVertexAttribArray(0);
+
+    // the texture
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(GLfloat) * 4, (void *)(2 * sizeof(GLfloat)));
+    glEnableVertexAttribArray(1);
+    return vao;
+}
+
+
 struct world
 {
     vec2 max{10, 10};
 
     world() {}
 
-    void init(const graphics &g)
+    void init()
     {
-        // load the image
-        int x=0,y=0,nrChannels=0;
-        auto * mem = stbi_load("imgs/world.png", &x, &y, &nrChannels, 0);
-        printf("world image x=%d,y=%d,nrOfCh=%d\n", x,y,nrChannels);
+        // Load the image into a texture
+        texture_id_ = load_texture("imgs/world.png");
 
-        assert(x != 0 && "x is 0");
-        assert(y != 0 && "y is 0");
-        assert(mem != NULL && "loading image failed");
-
-        ////////////////////////////////////////
-        /// Load the vertices
-        ////////////////////////////////////////
-        const GLfloat vertices[] =
-        {
-            // position, texture coord
-            -1.0f, -1.0f, 0.0f, 1.0f, //
-             1.0f, -1.0f, 1.0f, 1.0f, //
-            -1.0f,  1.0f, 0.0f, 0.0f, //
-             1.0f, -1.0f, 1.0f, 1.0f, //
-             1.0f,  1.0f, 1.0f, 0.0f,  //
-            -1.0f,  1.0f, 0.0f, 0.0f  //
-        };
-
-        // sammelt die erstellten vbo
-        glGenVertexArrays(1, &vao_);
-        glBindVertexArray(vao_);
-
-        GLuint vbo;
-        glGenBuffers(1, &vbo);
-
-        glBindBuffer(GL_ARRAY_BUFFER, vbo);
-        glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
-
-        // the position
-        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(GLfloat) * 4, (void *)0);
-        glEnableVertexAttribArray(0);
-
-        // the texture
-        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(GLfloat) * 4, (void *)(2 * sizeof(GLfloat)));
-        glEnableVertexAttribArray(1);
-
-        ////////////////////////////////////////
-        /// Load the texture
-        ////////////////////////////////////////
-
-        // load the texture
-        glGenTextures(1, &texture_id_);
-
-        glBindTexture(GL_TEXTURE_2D, texture_id_);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, x, y, 0, GL_RGBA, GL_UNSIGNED_BYTE, mem);
-        glGenerateMipmap(GL_TEXTURE_2D);
-
-        stbi_image_free(mem);
+        // Load the vertices
+        vao_ = load_vao_for_texture();
     }
 
     void render(const graphics &g)
@@ -326,6 +365,7 @@ struct world
         // identity matrix
         glm::mat4 translate = glm::mat4(1.0);
         g.setMVP(translate);
+        g.setTexOffset(glm::mat4(1.0));
 
         glDrawArrays(GL_TRIANGLES, 0,6);
     }
@@ -366,42 +406,22 @@ struct snake : public isnake
 
     void up() override
     {
-        if(last_dir_ == direction::up || last_dir_ == direction::down )
-        {
-            return;
-        }
-
-        current_dir_ = direction::up;
+        goDir(direction::up, direction::down);
     }
 
     void down() override
     {
-        if(last_dir_ == direction::up || last_dir_ == direction::down )
-        {
-            return;
-        }
-
-        current_dir_ = direction::down;
+        goDir(direction::down, direction::up);
     }
 
     void left() override
     {
-        if(last_dir_ == direction::left || last_dir_ == direction::right )
-        {
-            return;
-        }
-
-        current_dir_ = direction::left;
+        goDir(direction::left, direction::right);
     }
 
     void right() override
     {
-        if(last_dir_ == direction::left || last_dir_ == direction::right )
-        {
-            return;
-        }
-
-        current_dir_ = direction::right;
+        goDir(direction::right, direction::left);
     }
 
     void move(const world &w)
@@ -432,67 +452,23 @@ struct snake : public isnake
         last_dir_ = current_dir_;
     }
 
-    void init(const graphics & g)
+    void init()
     {
-        // load the image
-        int x=0,y=0,nrChannels=0;
-        auto * mem = stbi_load("imgs/ball_small.png", &x, &y, &nrChannels, 0);
-        printf("world image x=%d,y=%d,nrOfCh=%d\n", x,y,nrChannels);
+        // Load the image into a texture
+        texture_id_ = load_texture("imgs/ball.png");
 
-        assert(x != 0 && "x is 0");
-        assert(y != 0 && "y is 0");
-        assert(mem != NULL && "loading image failed");
-
-        ////////////////////////////////////////
-        /// Load the vertices
-        ////////////////////////////////////////
-        const GLfloat vertices[] =
-        {
-            // position, texture coord
-            -1.0f, -1.0f, 0.0f, 1.0f, //
-             1.0f, -1.0f, 1.0f, 1.0f, //
-            -1.0f,  1.0f, 0.0f, 0.0f, //
-             1.0f, -1.0f, 1.0f, 1.0f, //
-             1.0f,  1.0f, 1.0f, 0.0f,  //
-            -1.0f,  1.0f, 0.0f, 0.0f  //
-        };
-
-        // sammelt die erstellten vbo
-        glGenVertexArrays(1, &vao_);
-        glBindVertexArray(vao_);
-
-        GLuint vbo;
-        glGenBuffers(1, &vbo);
-
-        glBindBuffer(GL_ARRAY_BUFFER, vbo);
-        glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
-
-        // the position
-        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(GLfloat) * 4, (void *)0);
-        glEnableVertexAttribArray(0);
-
-        // the texture
-        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(GLfloat) * 4, (void *)(2 * sizeof(GLfloat)));
-        glEnableVertexAttribArray(1);
-
-        ////////////////////////////////////////
-        /// Load the texture
-        ////////////////////////////////////////
-
-        // load the texture
-        glGenTextures(1, &texture_id_);
-
-        glBindTexture(GL_TEXTURE_2D, texture_id_);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, x, y, 0, GL_RGB, GL_UNSIGNED_BYTE, mem);
-        glGenerateMipmap(GL_TEXTURE_2D);
-
-        stbi_image_free(mem);
+        // Load the vertices
+        vao_ = load_vao_for_texture();
     }
 
     void render(const graphics &g, const world &w)
     {
         glBindTexture(GL_TEXTURE_2D, texture_id_);
         glBindVertexArray(vao_);
+
+        // so that PNG alphachannel works
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
         drawSection(head_, g, w);
 
@@ -501,6 +477,8 @@ struct snake : public isnake
         {
             drawSection(*it,g,w);
         }
+
+        glDisable(GL_BLEND);
     }
 
     void drawSection(const vec2 &pos,const graphics &g, const world &w)
@@ -515,6 +493,12 @@ struct snake : public isnake
 
         g.setMVP(translate * scale);
 
+        // is on position 0, pixel is 8x8
+        // NOTE This makes not much sense right now because I load the same 'tilemap/image' twice.
+        // NOTE If the image is shared as a real tilemap and the number of tiles is known, this magic
+        // NOTE number becomes logical (1/8 in my case).
+        g.setTexOffset(glm::scale(glm::vec3(0.125,0.125,0)));
+
         glDrawArrays(GL_TRIANGLES, 0, 6);
     }
 
@@ -528,6 +512,16 @@ private:
 
     enum class direction { up, left, right, down } current_dir_{direction::up};
     direction last_dir_{direction::up};
+
+    void goDir(const direction &dir, const direction &ignore)
+    {
+        if(last_dir_ == dir || last_dir_ == ignore )
+        {
+            return;
+        }
+
+        current_dir_ = dir;
+    }
 
     GLuint vao_{0};
     GLuint texture_id_{0};
@@ -549,59 +543,11 @@ struct item
 
     void init()
     {
-        // load the image
-        int x=0,y=0,nrChannels=0;
-        auto * mem = stbi_load("imgs/ball_small_red.png", &x, &y, &nrChannels, 0);
-        printf("world image x=%d,y=%d,nrOfCh=%d\n", x,y,nrChannels);
+        // load the image into a texture
+        texture_id_ = load_texture("imgs/ball.png");
 
-        assert(x != 0 && "x is 0");
-        assert(y != 0 && "y is 0");
-        assert(mem != NULL && "loading image failed");
-
-        ////////////////////////////////////////
-        /// Load the vertices
-        ////////////////////////////////////////
-        const GLfloat vertices[] =
-        {
-            // position, texture coord
-            -1.0f, -1.0f, 0.0f, 1.0f, //
-             1.0f, -1.0f, 1.0f, 1.0f, //
-            -1.0f,  1.0f, 0.0f, 0.0f, //
-             1.0f, -1.0f, 1.0f, 1.0f, //
-             1.0f,  1.0f, 1.0f, 0.0f,  //
-            -1.0f,  1.0f, 0.0f, 0.0f  //
-        };
-
-        // sammelt die erstellten vbo
-        glGenVertexArrays(1, &vao_);
-        glBindVertexArray(vao_);
-
-        GLuint vbo;
-        glGenBuffers(1, &vbo);
-
-        glBindBuffer(GL_ARRAY_BUFFER, vbo);
-        glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
-
-        // the position
-        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(GLfloat) * 4, (void *)0);
-        glEnableVertexAttribArray(0);
-
-        // the texture
-        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(GLfloat) * 4, (void *)(2 * sizeof(GLfloat)));
-        glEnableVertexAttribArray(1);
-
-        ////////////////////////////////////////
-        /// Load the texture
-        ////////////////////////////////////////
-
-        // load the texture
-        glGenTextures(1, &texture_id_);
-
-        glBindTexture(GL_TEXTURE_2D, texture_id_);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, x, y, 0, GL_RGB, GL_UNSIGNED_BYTE, mem);
-        glGenerateMipmap(GL_TEXTURE_2D);
-
-        stbi_image_free(mem);
+        // Load the vertices
+        vao_ = load_vao_for_texture();
     }
 
     void render(const graphics &g, const world &w)
@@ -613,6 +559,10 @@ struct item
         {
             return;
         }
+
+        // so that PNG alphachannel works
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
         glBindTexture(GL_TEXTURE_2D, texture_id_);
         glBindVertexArray(vao_);
@@ -627,7 +577,12 @@ struct item
 
         g.setMVP(translate * scale);
 
+        // is on position 1, pixel is 8x8
+        g.setTexOffset(glm::translate(glm::mat4(1.0), glm::vec3(0.125,0,0)) * glm::scale(glm::vec3(0.125,0.125,0)));
+
         glDrawArrays(GL_TRIANGLES, 0, 6);
+
+        glDisable(GL_BLEND);
     }
 
     void hide()
@@ -642,7 +597,7 @@ struct item
 
     void reset(const double &time)
     {
-        pos_.first = (int)(time * 100) % 10;
+        pos_.first = (int)time % 10;
         pos_.second = (int)(time * 1000) % 10;
         hide_ = false;
     }
@@ -677,8 +632,8 @@ int main()
     app.s = &s;
     app.ready = true;
 
-    w.init(g);
-    s.init(g);
+    w.init();
+    s.init();
     i.init();
 
     double last_update = -1;

@@ -10,7 +10,7 @@ clean:
 	@rmdir $(BIN_DIR)
 
 $(BIN_DIR)/%: %.c
-	@mkdir -p $@
+	@mkdir -p $(BIN_DIR)
 	$(CC) $(CFLAGS) $(LDFLAGS) $< -o $@
 
 .PHONY: all build clean
